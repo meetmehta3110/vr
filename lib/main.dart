@@ -1,6 +1,8 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_image_labeling/google_mlkit_image_labeling.dart';
@@ -9,9 +11,13 @@ late List<CameraDescription> _cameras;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  _cameras = await availableCameras();
+  try {
+    _cameras = await availableCameras();
+  } catch (e) {
+    debugPrint("Failed to get cameras: $e");
+    _cameras = [];
+  }
   
-  // Keep orientation portrait for simplicity
   await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   
   runApp(const MyApp());
@@ -22,10 +28,17 @@ class MyApp extends StatelessWidget {
   
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
+    return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'AR Demo',
-      home: ImageRecognitionDemo(),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.cyanAccent,
+          brightness: Brightness.dark,
+        ),
+      ),
+      home: const ImageRecognitionDemo(),
     );
   }
 }
@@ -37,26 +50,41 @@ class ImageRecognitionDemo extends StatefulWidget {
   State<ImageRecognitionDemo> createState() => _ImageRecognitionDemoState();
 }
 
-class _ImageRecognitionDemoState extends State<ImageRecognitionDemo> {
+class _ImageRecognitionDemoState extends State<ImageRecognitionDemo> with SingleTickerProviderStateMixin {
   CameraController? _controller;
   ImageLabeler? _imageLabeler;
   bool _isProcessing = false;
   bool _imageDetected = false;
+  String? _errorMessage;
+  XFile? _lastCapturedImage;
+  
+  late AnimationController _scanController;
 
   // The text to display when the image is detected
-  final String _overlayText = "this is demo for musis of skikm gantegok karma bhai";
+  final String _overlayText = "this testing image test for ar";
 
   @override
   void initState() {
     super.initState();
     _initializeCamera();
-    _initializeLabeler();
+    if (!kIsWeb) {
+      _initializeLabeler();
+    }
+    
+    _scanController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 2),
+    )..repeat(reverse: true);
   }
 
   void _initializeCamera() async {
-    if (_cameras.isEmpty) return;
+    if (_cameras.isEmpty) {
+      setState(() {
+        _errorMessage = "No camera found on this device.";
+      });
+      return;
+    }
     
-    // Choose the first back camera
     final camera = _cameras.firstWhere(
       (cam) => cam.lensDirection == CameraLensDirection.back,
       orElse: () => _cameras.first,
@@ -66,64 +94,77 @@ class _ImageRecognitionDemoState extends State<ImageRecognitionDemo> {
       camera,
       ResolutionPreset.high,
       enableAudio: false,
-      imageFormatGroup: Platform.isAndroid 
-          ? ImageFormatGroup.nv21 
-          : ImageFormatGroup.bgra8888,
+      imageFormatGroup: kIsWeb 
+          ? ImageFormatGroup.jpeg 
+          : (Platform.isAndroid ? ImageFormatGroup.nv21 : ImageFormatGroup.bgra8888),
     );
 
-    await _controller?.initialize();
-    if (!mounted) return;
+    try {
+      await _controller?.initialize();
+      if (!mounted) return;
 
-    _controller?.startImageStream((CameraImage image) {
-      if (!_isProcessing) {
-        _processCameraImage(image);
+      if (!kIsWeb) {
+        _controller?.startImageStream((CameraImage image) {
+          if (!_isProcessing) {
+            _processCameraImage(image);
+          }
+        });
       }
-    });
-    setState(() {});
+      
+      setState(() {
+        _errorMessage = null;
+      });
+    } catch (e) {
+      setState(() {
+        _errorMessage = "Camera Error: ${e.toString()}";
+      });
+    }
   }
 
   void _initializeLabeler() {
-    // For a production app with a SPECIFIC image, you would use a Custom Image Labeler
-    // powered by a trained .tflite model containing only your reference painting.
-    // final modelPath = 'assets/my_custom_model.tflite';
-    // final options = CustomLabelerOptions(modelPath: modelPath, confidenceThreshold: 0.7);
-    // _imageLabeler = ImageLabeler(options: options);
-
-    // For this DEMO, we use the base ML Kit model and trigger the overlay 
-    // whenever it detects a "Painting", "Art", or "Picture frame".
-    final options = ImageLabelerOptions(confidenceThreshold: 0.65);
-    _imageLabeler = ImageLabeler(options: options);
+    try {
+      final options = ImageLabelerOptions(confidenceThreshold: 0.5); // Lower threshold for easier demo
+      _imageLabeler = ImageLabeler(options: options);
+    } catch (e) {
+      debugPrint("ML Kit initialization failed: $e");
+    }
   }
 
   Future<void> _processCameraImage(CameraImage image) async {
+    if (_imageLabeler == null) return;
+    
     _isProcessing = true;
     try {
       final inputImage = _inputImageFromCameraImage(image);
       if (inputImage == null) return;
 
       final labels = await _imageLabeler?.processImage(inputImage);
-      bool foundPainting = false;
+      bool foundTarget = false;
 
       if (labels != null) {
         for (final label in labels) {
           final text = label.label.toLowerCase();
-          // Demo logic: If it sees a "painting" or "art", consider it a match
-          if (text.contains('painting') || text.contains('art') || text.contains('picture frame')) {
-            foundPainting = true;
+          // Keywords that match the Starry Night painting
+          if (text.contains('painting') || 
+              text.contains('art') || 
+              text.contains('starry night') ||
+              text.contains('visual arts') ||
+              text.contains('museum') ||
+              text.contains('picture frame')) {
+            foundTarget = true;
             break;
           }
         }
       }
 
-      if (_imageDetected != foundPainting) {
+      if (_imageDetected != foundTarget) {
         setState(() {
-          _imageDetected = foundPainting;
+          _imageDetected = foundTarget;
         });
       }
     } catch (e) {
       debugPrint("Error processing image: $e");
     } finally {
-      // Small delay to prevent running recognition too frequently (saves battery)
       await Future.delayed(const Duration(milliseconds: 100));
       if (mounted) {
         _isProcessing = false;
@@ -136,17 +177,12 @@ class _ImageRecognitionDemoState extends State<ImageRecognitionDemo> {
     final camera = _controller!.description;
     final sensorOrientation = camera.sensorOrientation;
     
-    // Calculate rotation
     InputImageRotation? rotation;
     if (Platform.isIOS) {
       rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
     } else if (Platform.isAndroid) {
-      var rotationCompensation = 0; // for simplicity assuming portrait
-      if (camera.lensDirection == CameraLensDirection.front) {
-        rotationCompensation = (sensorOrientation + rotationCompensation) % 360;
-      } else {
-        rotationCompensation = (sensorOrientation - rotationCompensation + 360) % 360;
-      }
+      var rotationCompensation = 0; 
+      rotationCompensation = (sensorOrientation - rotationCompensation + 360) % 360;
       rotation = InputImageRotationValue.fromRawValue(rotationCompensation);
     }
     
@@ -180,9 +216,35 @@ class _ImageRecognitionDemoState extends State<ImageRecognitionDemo> {
     return allBytes.done().buffer.asUint8List();
   }
 
+  Future<void> _takePhoto() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+
+    try {
+      final image = await _controller!.takePicture();
+      setState(() {
+        _lastCapturedImage = image;
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text("Photo Captured Successfully!"),
+            backgroundColor: Colors.cyanAccent.withOpacity(0.8),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("Error taking photo: $e");
+    }
+  }
+
   @override
   void dispose() {
-    _controller?.stopImageStream();
+    _scanController.dispose();
+    if (!kIsWeb) {
+      _controller?.stopImageStream();
+    }
     _controller?.dispose();
     _imageLabeler?.close();
     super.dispose();
@@ -190,10 +252,47 @@ class _ImageRecognitionDemoState extends State<ImageRecognitionDemo> {
 
   @override
   Widget build(BuildContext context) {
+    if (_errorMessage != null) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.error_outline, color: Colors.redAccent, size: 64),
+                const SizedBox(height: 16),
+                Text(
+                  _errorMessage!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white, fontSize: 18),
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton(
+                  onPressed: _initializeCamera,
+                  child: const Text("Retry"),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     if (_controller == null || !_controller!.value.isInitialized) {
       return const Scaffold(
         backgroundColor: Colors.black,
-        body: Center(child: CircularProgressIndicator(color: Colors.white)),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(color: Colors.cyanAccent),
+              SizedBox(height: 16),
+              Text("Initializing AR Engine...", style: TextStyle(color: Colors.white70)),
+            ],
+          ),
+        ),
       );
     }
 
@@ -204,80 +303,233 @@ class _ImageRecognitionDemoState extends State<ImageRecognitionDemo> {
           // 1. Camera Preview
           CameraPreview(_controller!),
 
-          // 2. Overlay (Bounding Box / Highlight visual feedback)
+          // 2. Scanning / AR Overlay
+          if (!_imageDetected && !kIsWeb)
+            AnimatedBuilder(
+              animation: _scanController,
+              builder: (context, child) {
+                return Stack(
+                  children: [
+                    // Moving Scan Line
+                    Positioned(
+                      top: MediaQuery.of(context).size.height * 0.2 + 
+                           (MediaQuery.of(context).size.height * 0.6 * _scanController.value),
+                      left: 40,
+                      right: 40,
+                      child: Container(
+                        height: 2,
+                        decoration: BoxDecoration(
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.cyanAccent.withOpacity(0.5),
+                              blurRadius: 10,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                          gradient: const LinearGradient(
+                            colors: [Colors.transparent, Colors.cyanAccent, Colors.transparent],
+                          ),
+                        ),
+                      ),
+                    ),
+                    // Guide Corners
+                    Center(
+                      child: Container(
+                        width: 280,
+                        height: 350,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.white10, width: 1),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+
+          // 3. Detection Locked Overlay
           if (_imageDetected)
             Center(
-              child: Container(
-                width: 300,
-                height: 400,
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.greenAccent, width: 4),
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.greenAccent.withOpacity(0.3),
-                      blurRadius: 20,
-                      spreadRadius: 5,
+              child: TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0.8, end: 1.0),
+                duration: const Duration(milliseconds: 500),
+                curve: Curves.elasticOut,
+                builder: (context, value, child) {
+                  return Transform.scale(
+                    scale: value,
+                    child: Container(
+                      width: 300,
+                      height: 400,
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.cyanAccent, width: 3),
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.cyanAccent.withOpacity(0.4),
+                            blurRadius: 30,
+                            spreadRadius: 5,
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+
+          // 4. Status Bar
+          Positioned(
+            top: 50,
+            left: 20,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.black87,
+                borderRadius: BorderRadius.circular(30),
+                border: Border.all(color: _imageDetected ? Colors.cyanAccent : Colors.white24),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    _imageDetected ? Icons.lock : Icons.search,
+                    color: _imageDetected ? Colors.cyanAccent : Colors.white70,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    _imageDetected ? "TARGET LOCKED" : (kIsWeb ? "WEB MODE" : "SCANNING FOR AR..."),
+                    style: TextStyle(
+                      color: _imageDetected ? Colors.cyanAccent : Colors.white70,
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // 5. AR Text Overlay
+          if (_imageDetected)
+            Positioned(
+              top: 120,
+              left: 25,
+              right: 25,
+              child: _buildARContainer(
+                child: Column(
+                  children: [
+                    const Icon(Icons.info_outline, color: Colors.cyanAccent, size: 36),
+                    const SizedBox(height: 16),
+                    Text(
+                      _overlayText,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      "Detected: Starry Night",
+                      style: TextStyle(color: Colors.cyanAccent, fontSize: 12, fontWeight: FontWeight.w500),
                     ),
                   ],
                 ),
               ),
             ),
 
-          // 3. Text Overlay
-          if (_imageDetected)
-            Positioned(
-              top: 80,
-              left: 20,
-              right: 20,
-              child: TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0.0, end: 1.0),
-                duration: const Duration(milliseconds: 300),
-                builder: (context, value, child) {
-                  return Opacity(
-                    opacity: value,
-                    child: Transform.translate(
-                      offset: Offset(0, 20 * (1 - value)),
-                      child: child,
-                    ),
-                  );
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 24),
-                  decoration: BoxDecoration(
-                    color: Colors.black87,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: Colors.greenAccent.withOpacity(0.5), width: 1),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.5),
-                        blurRadius: 10,
-                        offset: const Offset(0, 5),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.check_circle_outline, color: Colors.greenAccent, size: 32),
-                      const SizedBox(height: 12),
-                      Text(
-                        _overlayText,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
-                          height: 1.4,
+          // 6. Capture Control
+          Positioned(
+            bottom: 40,
+            left: 0,
+            right: 0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                // Gallery Thumbnail
+                if (_lastCapturedImage != null)
+                  GestureDetector(
+                    onTap: () => _showImageDialog(_lastCapturedImage!.path),
+                    child: Container(
+                      width: 60,
+                      height: 60,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.white, width: 2),
+                        image: DecorationImage(
+                          image: kIsWeb 
+                            ? NetworkImage(_lastCapturedImage!.path) 
+                            : FileImage(File(_lastCapturedImage!.path)) as ImageProvider,
+                          fit: BoxFit.cover,
                         ),
                       ),
-                    ],
+                    ),
+                  )
+                else
+                  const SizedBox(width: 60),
+
+                // Shutter
+                GestureDetector(
+                  onTap: _takePhoto,
+                  child: Container(
+                    width: 80,
+                    height: 80,
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 3),
+                    ),
+                    child: Container(
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white,
+                      ),
+                    ),
                   ),
                 ),
-              ),
+
+                const SizedBox(width: 60),
+              ],
             ),
+          ),
         ],
       ),
+    );
+  }
+
+  void _showImageDialog(String path) {
+    showDialog(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(borderRadius: BorderRadius.circular(20)),
+          child: kIsWeb ? Image.network(path) : Image.file(File(path)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildARContainer({required Widget child}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 20),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.85),
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: Colors.cyanAccent.withOpacity(0.5), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.cyanAccent.withOpacity(0.2),
+            blurRadius: 20,
+            spreadRadius: 2,
+          ),
+        ],
+      ),
+      child: child,
     );
   }
 }
